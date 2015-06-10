@@ -1,0 +1,121 @@
+#!/usr/bin/env python
+"""
+Git hook to create a copy of the main database each time you're in a branch
+"""
+import os
+import sys
+import imp
+import subprocess
+MASTER_BRANCH = "master"
+
+PG_TRANSLATION = {"NAME_OLD": "database",
+                  "USER": "user",
+                  "HOST": "host",
+                  "PASSWORD": "password",
+                  "PORT": "port"}
+
+
+def configure_database(alias, conf, file_path, branch):
+    # NOBRANCH say that this database should not be cloned
+    # if the db backend is not psycopg2 we do nothing
+
+    if conf.get("NOBRANCH") is True or \
+       conf.get("ENGINE") != "django.db.backends.postgresql_psycopg2":
+        return
+
+    else:
+        # first try to connect to the root database
+        db_connection = {}
+        for k, v in conf.iteritems():
+            if PG_TRANSLATION.get(k):
+                db_connection[PG_TRANSLATION[k]] = v
+
+        # database name is either NAME_OLD if you are already in a
+        # branch or NAME if your come from master
+
+        if not db_connection.get("database"):
+            db_connection["database"] = conf["NAME"]
+        try:
+            psycopg2.connect(**db_connection)
+        except psycopg2.OperationalError:
+            # if the root database does not exists it will be a pain
+            # in the ass to make a copy of a non existent database...
+            print "first create the databases needed for your project\
+            before using branch functionality"
+            return
+
+        cloned_database = db_connection.copy()
+        cloned_database["database"] = "{}_{}".format(
+            cloned_database["database"],
+            branch)
+
+        try:
+            # if the branch database already exists, we go on, thanks
+            # for the fish an goodbye
+
+            psycopg2.connect(**cloned_database)
+
+        except psycopg2.OperationalError:
+
+            # Ok now come the fun, the database does not exists. We
+            # need to create it. A simple creation upon the legacy
+            # database as the template and we are good to go
+
+            print "OK we need to copy the existing database"
+            subprocess.check_output(
+                ["createdb", "-O", db_connection["user"],
+                 "-T", db_connection["database"],
+                 cloned_database["database"]])
+        # Now in the special configuration file we write the
+        # connection parameters
+        with open(file_path, "w") as branch_settings:
+            branch_settings.write("{}='{}'\n".format(
+                alias, cloned_database["database"]))
+
+
+def clone_database():
+    """ clone or reuse existing database if the branch is not master """
+
+    is_branch_checkout = sys.argv[3]
+    if is_branch_checkout:
+        # checkout can come from a file checkout. We only handle
+        # branch checkout
+
+
+        branch = subprocess.check_output(
+            ["git", "symbolic-ref", "-q", "HEAD"]
+        ).split("/")[-1].strip()
+
+        # check if a setup.py file exists. If not no need to go futher
+
+        try:
+            import setup
+        except ImportError:
+            print "You shoud install this project (see README) to \
+enable branch databases fonctionality"
+            return
+
+        # file_path where specific configuration options will take place
+
+        file_path = os.path.join(
+            os.path.dirname(os.path.abspath(setup.__file__)),
+            "branch_settings.py")
+
+        # On a checkout to master we remove the specific branch setting
+        if branch == MASTER_BRANCH:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return
+
+        settings = imp.load_source('settings', setup.DATABASE_SETTINGS)
+
+        for alias, conf in settings.DATABASES.iteritems():
+            configure_database(alias, conf, file_path, branch)
+
+if __name__ == '__main__':
+    try:
+        import psycopg2
+        clone_database()
+    except ImportError:
+        print("You shoud install psycopg2 to \
+enable branch databases fonctionality")
